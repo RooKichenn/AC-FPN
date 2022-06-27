@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from torch.jit.annotations import Tuple, List, Dict
 
+# AC-FPN 实现代码
 
 class DenseBlock(nn.Module):
     def __init__(self, input_num, num1, num2, rate, drop_out):
