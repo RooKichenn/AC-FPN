@@ -9,6 +9,61 @@ from torch.jit.annotations import Tuple, List, Dict
 
 # AC-FPN 实现代码
 
+# 实现了CxAM和CnAM模块
+class CxAM(nn.Module):
+    def __init__(self, in_channels, out_channels, reduction=8):
+        super(CxAM, self).__init__()
+        self.key_conv = nn.Conv2d(in_channels, out_channels//reduction, 1)
+        self.query_conv = nn.Conv2d(in_channels, out_channels//reduction, 1)
+        self.value_conv = nn.Conv2d(in_channels, in_channels, 1)
+        self.sigmoid = nn.Sigmoid()
+        self.avg = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self, x):
+        m_batchsize, C, width, height = x.size()
+
+        proj_query = self.query_conv(x).view(m_batchsize, -1, width*height).permute(0, 2, 1)   # B x N x C'
+
+        proj_key = self.key_conv(x).view(m_batchsize, -1, width*height)  # B x C' x N
+
+        R = torch.bmm(proj_query, proj_key).view(m_batchsize, width*height, width, height)  # B x N x W x H
+        # 先进行全局平均池化, 此时 R 的shape为 B x N x 1 x 1, 再进行view, R 的shape为 B x 1 x W x H
+        attention_R = self.sigmoid(self.avg(R).view(m_batchsize, -1, width, height))    # B x 1 x W x H
+
+        proj_value = self.value_conv(x)
+
+        out = proj_value * attention_R  # B x W x H
+
+        return out
+
+
+class CnAM(nn.Module):
+    def __init__(self, in_channels, out_channels, reduction=8):
+        super(CnAM, self).__init__()
+        # 原文中对应的P, Z, S
+        self.Z_conv = nn.Conv2d(in_channels, out_channels // reduction, 1)
+        self.P_conv = nn.Conv2d(in_channels, out_channels // reduction, 1)
+        self.value_conv = nn.Conv2d(in_channels, in_channels, 1)
+        self.sigmoid = nn.Sigmoid()
+        self.avg = nn.AdaptiveAvgPool2d(1)
+
+    # CnAM使用了FPN中的F5和CEM输出的特征图F
+    def forward(self, F5, F):
+        m_batchsize, C, width, height = F5.size()
+
+        proj_query = self.P_conv(F5).view(m_batchsize, -1, width*height).permute(0, 2, 1)  # B x N x C''
+
+        proj_key = self.Z_conv(F5).view(m_batchsize, -1, width * height)  # B x C'' x N
+
+        S = torch.bmm(proj_query, proj_key).view(m_batchsize, width * height, width, height)  # B x N x W x H
+        attention_S = self.sigmoid(self.avg(S).view(m_batchsize, -1, width, height))  # B x 1 x W x H
+
+        proj_value = self.value_conv(F)
+
+        out = proj_value * attention_S  # B x W x H
+
+        return out
+
 class DenseBlock(nn.Module):
     def __init__(self, input_num, num1, num2, rate, drop_out):
         super(DenseBlock, self).__init__()
@@ -74,6 +129,12 @@ class FeaturePyramidNetwork(nn.Module):
     def __init__(self, in_channels_list, out_channels, extra_blocks=None):
         super().__init__()
         self.dense = DenseAPP(num_channels=in_channels_list[-1])
+        
+        # ----------------增加AM模块------------------------#
+        self.CxAM = CxAM(in_channels=256, out_channels=256)
+        self.CnAM = CnAM(in_channels=256, out_channels=256) 
+        # -------------------------------------------------#
+        
         # 用来调整resnet特征矩阵(layer1,2,3,4)的channel（kernel_size=1）
         self.inner_blocks = nn.ModuleList()
         # 对调整后的特征矩阵使用3x3的卷积核来得到对应的预测特征矩阵
@@ -138,11 +199,19 @@ class FeaturePyramidNetwork(nn.Module):
         # unpack OrderedDict into two lists for easier handling
         names = list(x.keys())
         x = list(x.values())
+        
         # 将C5送入DenseAPP中获得上下文信息
         dense = self.dense(x[-1])
+        
         # 将resnet layer4的channel调整到指定的out_channels
         # last_inner = self.inner_blocks[-1](x[-1])
         last_inner = self.get_result_from_inner_blocks(x[-1], -1)
+        
+        # 将dense送入cxam模块和cnam模块
+        cxam = self.CxAM(dense)
+        cnam = self.CnAM(dense, last_inner)
+        result = cxam + cnam
+        
         # result中保存着每个预测特征层
         results = []
         # 将layer4调整channel后的特征矩阵，通过3x3卷积后得到对应的预测特征矩阵
