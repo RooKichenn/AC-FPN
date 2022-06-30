@@ -130,7 +130,7 @@ class FeaturePyramidNetwork(nn.Module):
         super().__init__()
         self.dense = DenseAPP(num_channels=in_channels_list[-1])
         
-        # ----------------增加AM模块------------------------#
+        # --------增加AM模块，若不想使用，可直接注释掉--------#
         self.CxAM = CxAM(in_channels=256, out_channels=256)
         self.CnAM = CnAM(in_channels=256, out_channels=256) 
         # -------------------------------------------------#
@@ -207,7 +207,7 @@ class FeaturePyramidNetwork(nn.Module):
         # last_inner = self.inner_blocks[-1](x[-1])
         last_inner = self.get_result_from_inner_blocks(x[-1], -1)
         
-        # 将dense送入cxam模块和cnam模块
+        # 将dense送入cxam模块和cnam模块，不想使用AM模块注释下面三行即可
         cxam = self.CxAM(dense)
         cnam = self.CnAM(dense, last_inner)
         result = cxam + cnam
@@ -216,8 +216,13 @@ class FeaturePyramidNetwork(nn.Module):
         results = []
         # 将layer4调整channel后的特征矩阵，通过3x3卷积后得到对应的预测特征矩阵
         # results.append(self.layer_blocks[-1](last_inner))
-
-        P5 = dense + self.get_result_from_layer_blocks(last_inner, -1)
+        
+        # 不使用AM模块
+        # P5 = dense + self.get_result_from_layer_blocks(last_inner, -1)
+        
+        # 使用AM模块
+        P5 = result + self.get_result_from_layer_blocks(last_inner, -1)
+        
         results.append(P5)
 
         for idx in range(len(x) - 2, -1, -1):
